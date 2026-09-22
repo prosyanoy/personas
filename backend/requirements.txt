@@ -1,0 +1,10 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+beautifulsoup4>=4.12
+lxml>=5.0
+curl_cffi>=0.7
+pycryptodome>=3.20
+python-dotenv>=1.0
+telethon>=1.36
+selenium>=4.20
