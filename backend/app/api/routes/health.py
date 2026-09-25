@@ -6,5 +6,5 @@ router = APIRouter(tags=["health"])
 
 @router.get("/healthz")
 async def healthz() -> dict:
-    db.list_profiles()
+    db._connect().execute('SELECT 1').fetchone()
     return {"status": "ok", "database": "ok"}

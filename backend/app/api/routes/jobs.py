@@ -1,6 +1,7 @@
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from app.auth import require_user
 from pydantic import BaseModel, Field
 
 from app import db
@@ -52,13 +53,13 @@ async def list_jobs(source: SourceName | None = None, limit: int = 200) -> list[
     return db.list_jobs(source=source, limit=limit)
 
 @router.post("/match")
-async def match(body: MatchRequest) -> list[MatchResult]:
+async def match(body: MatchRequest, user: dict = Depends(require_user)) -> list[MatchResult]:
     prefs = body.preferences
     if body.profile_id or (not prefs.skills and prefs.years_experience is None):
         if body.profile_id:
-            profile = db.get_profile(body.profile_id)
+            profile = db.get_profile(body.profile_id, user['id'])
         else:
-            profiles = db.list_profiles()
+            profiles = db.list_profiles(user['id'])
             profile = profiles[0] if profiles else None
         if body.profile_id and profile is None:
             raise ApiError(404, "NOT_FOUND", "Profile not found")

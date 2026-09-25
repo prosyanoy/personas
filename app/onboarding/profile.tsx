@@ -18,6 +18,8 @@ import {
 } from '@/llm/prep';
 import { consentAndDownload, llmReady, useLlmState } from '@/llm/model';
 import { shareUnknownQuestions } from '@/api';
+import { useAuth } from '@/state/auth';
+import { useQueryClient } from '@tanstack/react-query';
 import type { ResumeFields } from '@/pdf/resume';
 import { useOnboarding } from '@/state/onboarding';
 import { colors, font, radius, spacing } from '@/theme/tokens';
@@ -122,6 +124,10 @@ export function ProfileStage() {
   const router = useRouter();
   const setFooter = useContext(StageFooterContext);
   const { resumeFields, profileId, setDigitalProfile } = useOnboarding();
+  const { completeOnboarding } = useAuth();
+  const client = useQueryClient();
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const llm = useLlmState();
 
   const firstName = resumeFields?.name?.split(' ')[0] ?? 'there';
@@ -187,35 +193,47 @@ export function ProfileStage() {
     setQuestionsBusy(false);
   };
 
-  const finish = () => {
-    const unknownIdx = Object.keys(answers)
-      .map(Number)
-      .filter((i) => answers[i] === 'dont');
-    setDigitalProfile({
-      topics: [...picked],
-      questions: questions ?? [],
-      known: Object.keys(answers)
+  const finish = async () => {
+    if (saving || (questions && Object.keys(answers).length < questions.length)) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const unknownIdx = Object.keys(answers)
         .map(Number)
-        .filter((i) => answers[i] === 'know'),
-      readiness: score,
-    });
+        .filter((i) => answers[i] === 'dont');
+      setDigitalProfile({
+        topics: [...picked],
+        questions: questions ?? [],
+        known: Object.keys(answers)
+          .map(Number)
+          .filter((i) => answers[i] === 'know'),
+        readiness: score,
+      });
 
-    if (questions && unknownIdx.length) {
-      const skills = resumeFields?.skills ?? [];
-      void shareUnknownQuestions({
-        profileId,
-        author: resumeFields?.name?.split(' ')[0] ?? 'You',
-        questions: unknownIdx.map((i) => {
-          const q = questions[i].toLowerCase();
-          return {
-            question: questions[i],
-            topic: [...picked].find((t) => q.includes(t.toLowerCase())) ?? [...picked][0] ?? null,
-            skills,
-          };
-        }),
-      }).catch(() => {});
+      if (questions && unknownIdx.length) {
+        const skills = resumeFields?.skills ?? [];
+        await shareUnknownQuestions({
+          profileId,
+          author: resumeFields?.name?.split(' ')[0] ?? 'You',
+          questions: unknownIdx.map((i) => {
+            const q = questions[i].toLowerCase();
+            return {
+              question: questions[i],
+              topic: [...picked].find((t) => q.includes(t.toLowerCase())) ?? [...picked][0] ?? null,
+              skills,
+            };
+          }),
+        });
+      }
+      await client.invalidateQueries({ queryKey: ['myQuestions'] });
+      await client.invalidateQueries({ queryKey: ['threads'] });
+      await completeOnboarding();
+      router.replace('/(tabs)');
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : 'Could not save your questions. Please retry.');
+    } finally {
+      setSaving(false);
     }
-    router.replace('/(tabs)');
   };
 
   const answeredCount = Object.keys(answers).length;
@@ -237,7 +255,8 @@ export function ProfileStage() {
             <Text style={styles.trendText}>{readinessLabel(score)}</Text>
           </View>
         </View>
-        <PrimaryButton label="View Scouted Roles" onPress={finish} disabled={!allAnswered} />
+        <PrimaryButton label={saving ? 'Saving…' : 'View Scouted Roles'} onPress={() => void finish()} disabled={!allAnswered || saving} />
+        {saveError ? <Text accessibilityRole="alert" style={styles.caption}>{saveError}</Text> : null}
         <Text style={styles.caption}>
           {allAnswered
             ? 'Your responses calibrate AI scout matching weights and interview prep prompts.'
@@ -247,7 +266,7 @@ export function ProfileStage() {
     );
     return () => setFooter(null);
 
-  }, [score, picked.size, questions, knownCount, answeredCount, allAnswered]);
+  }, [score, picked, questions, answers, knownCount, answeredCount, allAnswered, saving, saveError, profileId]);
 
 
   const firstUnanswered = questions

@@ -75,43 +75,50 @@ def _connect() -> sqlite3.Connection:
             )
         if "description" not in qcols:
             _conn.execute("ALTER TABLE shared_questions ADD COLUMN description TEXT")
+        for table in ('resume_profiles', 'shared_questions', 'question_answers'):
+            columns = {r[1] for r in _conn.execute(f'PRAGMA table_info({table})')}
+            if 'user_id' not in columns:
+                _conn.execute(f'ALTER TABLE {table} ADD COLUMN user_id TEXT')
+            _conn.execute(f'CREATE INDEX IF NOT EXISTS {table}_user ON {table}(user_id)')
+        _conn.executescript('''
+            CREATE TABLE IF NOT EXISTS auth_users (
+                id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                onboarding_completed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS auth_challenges (
+                id TEXT PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL, purpose TEXT NOT NULL,
+                code_hash TEXT NOT NULL, ip_hash TEXT NOT NULL, created_at REAL NOT NULL,
+                expires_at REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                used INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS challenges_email_time ON auth_challenges(email, created_at);
+            CREATE INDEX IF NOT EXISTS challenges_ip_time ON auth_challenges(ip_hash, created_at);
+        ''')
         _conn.commit()
     return _conn
 
-def insert_profile(profile_id: UUID, body: IngestProfile) -> ProfileOut:
+def insert_profile(profile_id: UUID, body: IngestProfile, user_id: str) -> ProfileOut:
     with _lock:
         conn = _connect()
         conn.execute(
-            "INSERT INTO resume_profiles (id, source, file_name, file_size, fields, raw_text) VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                str(profile_id),
-                body.source,
-                body.fileName,
-                body.fileSize,
-                body.fields.model_dump_json(),
-                body.rawText,
-            ),
+            "INSERT INTO resume_profiles (id, source, file_name, file_size, fields, raw_text, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (str(profile_id), body.source, body.fileName, body.fileSize,
+             body.fields.model_dump_json(), body.rawText, user_id),
         )
         conn.commit()
-        if body.fields.name:
-            name = body.fields.name.strip()
-            conn.execute(
-                """UPDATE shared_questions SET profile_id = ?
-                   WHERE profile_id IS NULL AND kind != 'peer'
-                     AND (author = ? OR ? LIKE author || ' %' OR author LIKE ? || ' %')""",
-                (str(profile_id), name, name, name),
-            )
-            conn.commit()
         row = conn.execute(
             "SELECT * FROM resume_profiles WHERE id = ?", (str(profile_id),)
         ).fetchone()
     return _to_out(row)
 
-def update_profile_fields(profile_id: UUID, patch: dict) -> ProfileOut | None:
+def update_profile_fields(profile_id: UUID, patch: dict, user_id: str) -> ProfileOut | None:
     with _lock:
         conn = _connect()
         row = conn.execute(
-            "SELECT fields FROM resume_profiles WHERE id = ?", (str(profile_id),)
+            "SELECT fields FROM resume_profiles WHERE id = ? AND user_id = ?", (str(profile_id), user_id)
         ).fetchone()
         if row is None:
             return None
@@ -122,17 +129,17 @@ def update_profile_fields(profile_id: UUID, patch: dict) -> ProfileOut | None:
             (json.dumps(fields), str(profile_id)),
         )
         conn.commit()
-    return get_profile(profile_id)
+    return get_profile(profile_id, user_id)
 
-def get_profile(profile_id: UUID) -> ProfileOut | None:
+def get_profile(profile_id: UUID, user_id: str) -> ProfileOut | None:
     row = _connect().execute(
-        "SELECT * FROM resume_profiles WHERE id = ?", (str(profile_id),)
+        "SELECT * FROM resume_profiles WHERE id = ? AND user_id = ?", (str(profile_id), user_id)
     ).fetchone()
     return _to_out(row) if row else None
 
-def list_profiles() -> list[ProfileOut]:
+def list_profiles(user_id: str) -> list[ProfileOut]:
     rows = _connect().execute(
-        "SELECT * FROM resume_profiles ORDER BY created_at DESC LIMIT 100"
+        "SELECT * FROM resume_profiles WHERE user_id = ? ORDER BY created_at DESC LIMIT 100", (user_id,)
     ).fetchall()
     return [_to_out(r) for r in rows]
 
@@ -206,16 +213,24 @@ def share_questions(
     profile_id: str | None,
     author: str,
     items: list[dict],
-    seed_replies: bool = True,
+    user_id: str,
+    seed_replies: bool = False,
 ) -> list[str]:
     ids = []
     with _lock:
         conn = _connect()
         for it in items:
+            existing = conn.execute(
+                "SELECT id FROM shared_questions WHERE user_id = ? AND profile_id IS ? AND kind = 'unknown' AND question = ?",
+                (user_id, profile_id, it['question']),
+            ).fetchone()
+            if existing:
+                ids.append(existing['id'])
+                continue
             qid = uuid4().hex
             conn.execute(
-                "INSERT INTO shared_questions (id, profile_id, author, question, topic, skills, kind, description) VALUES (?, ?, ?, ?, ?, ?, 'unknown', ?)",
-                (qid, profile_id, author, it["question"], it.get("topic"), json.dumps(it.get("skills") or []), it.get("description")),
+                "INSERT INTO shared_questions (id, profile_id, author, question, topic, skills, kind, description, user_id) VALUES (?, ?, ?, ?, ?, ?, 'unknown', ?, ?)",
+                (qid, profile_id, author, it["question"], it.get("topic"), json.dumps(it.get("skills") or []), it.get("description"), user_id),
             )
             ids.append(qid)
             if seed_replies:
@@ -234,13 +249,14 @@ def post_question(
     description: str | None,
     topic: str | None,
     skills: list[str],
+    user_id: str,
 ) -> str:
     qid = uuid4().hex
     with _lock:
         conn = _connect()
         conn.execute(
-            "INSERT INTO shared_questions (id, profile_id, author, question, topic, skills, kind, description) VALUES (?, ?, ?, ?, ?, ?, 'post', ?)",
-            (qid, profile_id, author, question, topic, json.dumps(skills), description),
+            "INSERT INTO shared_questions (id, profile_id, author, question, topic, skills, kind, description, user_id) VALUES (?, ?, ?, ?, ?, ?, 'post', ?, ?)",
+            (qid, profile_id, author, question, topic, json.dumps(skills), description, user_id),
         )
         conn.commit()
     return qid
@@ -373,30 +389,17 @@ def list_answers(question_id: str) -> list[sqlite3.Row]:
         (question_id,),
     ).fetchall()
 
-def add_answer(question_id: str, author: str, body: str) -> None:
+def add_answer(question_id: str, author: str, body: str, user_id: str) -> None:
     with _lock:
         conn = _connect()
         conn.execute(
-            "INSERT INTO question_answers (id, question_id, author, body) VALUES (?, ?, ?, ?)",
-            (uuid4().hex, question_id, author, body),
+            "INSERT INTO question_answers (id, question_id, author, body, user_id) VALUES (?, ?, ?, ?, ?)",
+            (uuid4().hex, question_id, author, body, user_id),
         )
         conn.commit()
 
-def list_profile_questions(
-    profile_id: str | None, author: str | None
-) -> list[sqlite3.Row]:
-    author = (author or "").strip()
+def list_profile_questions(user_id: str) -> list[sqlite3.Row]:
     return _connect().execute(
-        """
-        SELECT * FROM shared_questions
-        WHERE kind != 'peer'
-          AND (
-            profile_id = ?
-            OR (author != '' AND (
-              author = ? OR ? LIKE author || ' %' OR author LIKE ? || ' %'
-            ))
-          )
-        ORDER BY created_at DESC LIMIT 100
-        """,
-        (profile_id or "", author, author, author),
+        "SELECT * FROM shared_questions WHERE user_id = ? ORDER BY created_at DESC",
+        (user_id,),
     ).fetchall()

@@ -4,7 +4,8 @@ import { type Job } from '@/data/mock';
 import type { ResumeFields } from '@/pdf/resume';
 import { colors } from '@/theme/tokens';
 
-export const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:8000';
+import { authFetch } from '@/auth';
+export { API_URL } from '@/auth';
 
 export type JobPosting = {
   source: 'linkedin' | 'naukri' | 'instahyre' | 'cutshort' | 'wellfound' | 'telegram';
@@ -49,11 +50,7 @@ export type ScoutResponse = {
 };
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(`${API_URL}${path}`, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
-  });
-  if (!resp.ok) throw new Error(`API ${path} failed (${resp.status})`);
+  const resp = await authFetch(path, init);
   return resp.json() as Promise<T>;
 }
 
@@ -241,13 +238,7 @@ export function useThreads(
   return useQuery<SharedQuestionThread[]>({
     queryKey: ['threads', category, profileId, author],
     queryFn: async () => {
-      const params = new URLSearchParams();
-      if (profileId) params.set('profile_id', profileId);
-      if (author) params.set('author', author);
-      const qs = params.toString();
-      const { threads } = await api<{ threads: SharedQuestionThread[] }>(
-        `/discussions${qs ? `?${qs}` : ''}`,
-      );
+      const { threads } = await api<{ threads: SharedQuestionThread[] }>('/discussions');
       if (category === 'For you') return threads;
       const c = category.toLowerCase();
       return threads.filter((t) =>
@@ -307,15 +298,7 @@ export function useMyQuestions(
 ) {
   return useQuery<SharedQuestionThread[]>({
     queryKey: ['myQuestions', profileId, author],
-    enabled: !!(profileId || author),
-    queryFn: () => {
-      const params = new URLSearchParams();
-      if (profileId) params.set('profile_id', profileId);
-      if (author) params.set('author', author);
-      return api<{ questions: SharedQuestionThread[] }>(
-        `/activity/questions?${params.toString()}`,
-      ).then((r) => r.questions);
-    },
+    queryFn: () => api<{ questions: SharedQuestionThread[] }>('/activity/questions').then((r) => r.questions),
   });
 }
 
@@ -330,7 +313,7 @@ export type IngestPayload = {
 };
 
 export async function ingestResumeProfile(payload: IngestPayload): Promise<{ id: string }> {
-  const resp = await fetch(`${API_URL}/profiles/ingest`, {
+  const resp = await authFetch('/profiles/ingest', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -363,7 +346,7 @@ export async function patchLatestProfile(
 }
 
 export async function fetchResumeViaBackend(url: string): Promise<ArrayBuffer> {
-  const resp = await fetch(`${API_URL}/resume/fetch`, {
+  const resp = await authFetch('/resume/fetch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url }),

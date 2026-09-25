@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { useAuth } from '@/state/auth';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -25,7 +26,18 @@ export default function Profile() {
   const router = useRouter();
   const { resumeFields, digitalProfile } = useOnboarding();
 
-  const name = resumeFields?.name?.trim() || 'Your profile';
+  const { user, signOut } = useAuth();
+  const [signingOut, setSigningOut] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const logout = async () => {
+    setSigningOut(true);
+    setAuthError(null);
+    try { await signOut(); }
+    catch (e) { setAuthError(e instanceof Error ? e.message : 'Could not sign out.'); }
+    finally { setSigningOut(false); }
+  };
+
+  const name = resumeFields?.name?.trim() || user?.name || 'Your profile';
   const title = resumeFields?.title?.trim() ?? null;
   const years = resumeFields?.yearsExperience ?? null;
   const location = resumeFields?.location?.trim() ?? null;
@@ -46,6 +58,7 @@ export default function Profile() {
             <Text style={styles.avatarText}>{initialsOf(name)}</Text>
           </LinearGradient>
           <Text style={styles.name}>{name}</Text>
+          <Text style={styles.meta}>{user?.email}</Text>
           <Text style={styles.meta}>
             {[title, years != null ? `${years} yrs exp` : null]
               .filter(Boolean)
@@ -95,6 +108,8 @@ export default function Profile() {
         <View style={styles.cta}>
           <PrimaryButton label="Redo onboarding" onPress={() => router.push('/onboarding')} />
         </View>
+        <PrimaryButton label={signingOut ? 'Signing out…' : 'Sign out'} onPress={() => void logout()} disabled={signingOut} />
+        {authError ? <Text accessibilityRole="alert" style={styles.hint}>{authError}</Text> : null}
       </ScrollView>
     </SafeAreaView>
   );

@@ -1,4 +1,7 @@
-import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Pressable, Text, View } from 'react-native';
+import { authRequest } from '@/auth';
+import { useAuth } from '@/state/auth';
 
 import type { ResumeFields } from '@/pdf/resume';
 
@@ -36,6 +39,10 @@ export type OnboardingState = {
 const OnboardingContext = createContext<OnboardingState | null>(null);
 
 export function OnboardingProvider({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  const [hydrating, setHydrating] = useState(!!user);
+  const [restoreError, setRestoreError] = useState(false);
+  const [retry, setRetry] = useState(0);
   const [connectors, setConnectors] = useState<string[]>([
     'linkedin',
     'telegram',
@@ -50,6 +57,25 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   const [timeline, setTimeline] = useState<string>('asap');
   const [stage, setStage] = useState(0);
   const [digitalProfile, setDigitalProfile] = useState<OnboardingState['digitalProfile']>(null);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    let active = true;
+    setHydrating(true);
+    setRestoreError(false);
+    void authRequest<{ id: string; fileName: string; fields: ResumeFields; createdAt: string }[]>('/profiles')
+      .then((profiles) => {
+        if (!active || !profiles[0]) return;
+        const profile = profiles[0];
+        setProfileId(profile.id);
+        setResumeFields(profile.fields);
+        setResumeFile({ name: profile.fileName, size: 0 });
+        setResumeAt(new Date(profile.createdAt));
+      })
+      .catch(() => { if (active) setRestoreError(true); })
+      .finally(() => { if (active) setHydrating(false); });
+    return () => { active = false; };
+  }, [user?.id, retry]);
 
   const toggleConnector = useCallback((id: string) => {
     setConnectors((prev) =>
@@ -95,6 +121,14 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     [connectors, connectorsAt, toggleConnector, completeConnectors, resumeFile, resumeAt, resumeFields, profileId, setResume, updateResumeFields, timeline, stage, digitalProfile],
   );
 
+  if (hydrating || restoreError) return (
+    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16 }}>
+      {hydrating ? <ActivityIndicator /> : <>
+        <Text>Could not restore your profile.</Text>
+        <Pressable accessibilityRole="button" onPress={() => setRetry((n) => n + 1)} style={{ padding: 16 }}><Text>Retry</Text></Pressable>
+      </>}
+    </View>
+  );
   return <OnboardingContext.Provider value={value}>{children}</OnboardingContext.Provider>;
 }
 
